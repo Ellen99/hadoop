@@ -55,15 +55,6 @@ public class TestDecodingValidator extends TestRawCoderBase {
         {new int[]{}, new int[]{0}, new int[]{1}}
        });
     return result;
-    // Arrays.asList(new Object[][] {
-    //     {RSRawErasureCoderFactory.class, 6, 3, new int[]{1}, new int[]{}},
-    //     {RSRawErasureCoderFactory.class, 6, 3, new int[]{3}, new int[]{0}},
-    //     {RSRawErasureCoderFactory.class, 6, 3, new int[]{2, 4}, new int[]{1}},
-    //     {NativeRSRawErasureCoderFactory.class, 6, 3, new int[]{0}, new int[]{}},
-    //     {XORRawErasureCoderFactory.class, 10, 1, new int[]{0}, new int[]{}},
-    //     {NativeXORRawErasureCoderFactory.class, 10, 1, new int[]{0},
-    //         new int[]{}}
-    // });
   }
   private static List<Object[]> cartesianProduct(Object[][] arrays) {
         List<Object[]> result = new ArrayList<>();
