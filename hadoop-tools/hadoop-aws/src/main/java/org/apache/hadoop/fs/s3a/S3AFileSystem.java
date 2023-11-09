@@ -34,7 +34,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -54,7 +53,6 @@ import javax.annotation.Nullable;
 
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.exception.SdkException;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
@@ -83,7 +81,6 @@ import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.S3Error;
-import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.model.SelectObjectContentRequest;
 import software.amazon.awssdk.services.s3.model.SelectObjectContentResponseHandler;
@@ -98,7 +95,6 @@ import software.amazon.awssdk.transfer.s3.model.CopyRequest;
 import software.amazon.awssdk.transfer.s3.model.FileUpload;
 import software.amazon.awssdk.transfer.s3.model.UploadFileRequest;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.fs.impl.prefetch.ExecutorServiceFuturePool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -239,6 +235,7 @@ import static org.apache.hadoop.fs.s3a.commit.CommitConstants.FS_S3A_COMMITTER_S
 import static org.apache.hadoop.fs.s3a.impl.CallableSupplier.submit;
 import static org.apache.hadoop.fs.s3a.impl.CreateFileBuilder.OPTIONS_CREATE_FILE_NO_OVERWRITE;
 import static org.apache.hadoop.fs.s3a.impl.CreateFileBuilder.OPTIONS_CREATE_FILE_OVERWRITE;
+import static org.apache.hadoop.fs.s3a.impl.CreateFileBuilder.OPTIONS_CREATE_FILE_PERFORMANCE;
 import static org.apache.hadoop.fs.s3a.impl.ErrorTranslation.isObjectNotFound;
 import static org.apache.hadoop.fs.s3a.impl.ErrorTranslation.isUnknownBucket;
 import static org.apache.hadoop.fs.s3a.impl.InternalConstants.AP_REQUIRED_EXCEPTION;
@@ -246,7 +243,6 @@ import static org.apache.hadoop.fs.s3a.impl.InternalConstants.ARN_BUCKET_OPTION;
 import static org.apache.hadoop.fs.s3a.impl.InternalConstants.CSE_PADDING_LENGTH;
 import static org.apache.hadoop.fs.s3a.impl.InternalConstants.DEFAULT_UPLOAD_PART_COUNT_LIMIT;
 import static org.apache.hadoop.fs.s3a.impl.InternalConstants.DELETE_CONSIDERED_IDEMPOTENT;
-import static org.apache.hadoop.fs.s3a.impl.InternalConstants.SC_301_MOVED_PERMANENTLY;
 import static org.apache.hadoop.fs.s3a.impl.InternalConstants.SC_403_FORBIDDEN;
 import static org.apache.hadoop.fs.s3a.impl.InternalConstants.SC_404_NOT_FOUND;
 import static org.apache.hadoop.fs.s3a.impl.InternalConstants.UPLOAD_PART_COUNT_LIMIT;
@@ -263,6 +259,7 @@ import static org.apache.hadoop.fs.statistics.impl.IOStatisticsBinding.trackDura
 import static org.apache.hadoop.fs.statistics.impl.IOStatisticsBinding.trackDurationOfSupplier;
 import static org.apache.hadoop.io.IOUtils.cleanupWithLogger;
 import static org.apache.hadoop.util.Preconditions.checkArgument;
+import static org.apache.hadoop.util.functional.RemoteIterators.foreach;
 import static org.apache.hadoop.util.functional.RemoteIterators.typeCastingRemoteIterator;
 
 /**
@@ -332,8 +329,6 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
   private int executorCapacity;
   private long multiPartThreshold;
   public static final Logger LOG = LoggerFactory.getLogger(S3AFileSystem.class);
-  /** Exactly once log to warn about setting the region in config to avoid probe. */
-  private static final LogExactlyOnce SET_REGION_WARNING = new LogExactlyOnce(LOG);
 
   /** Log to warn of storage class configuration problems. */
   private static final LogExactlyOnce STORAGE_CLASS_WARNING = new LogExactlyOnce(LOG);
@@ -354,7 +349,8 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
   private S3AStatisticsContext statisticsContext;
   /** Storage Statistics Bonded to the instrumentation. */
   private S3AStorageStatistics storageStatistics;
-
+  /** Should all create files be "performance" unless unset. */
+  private boolean performanceCreation;
   /**
    * Default input policy; may be overridden in
    * {@code openFile()}.
@@ -390,6 +386,11 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
   private AWSCredentialProviderList credentials;
   private SignerManager signerManager;
   private S3AInternals s3aInternals;
+
+  /**
+   * Do directory operations purge pending uploads?
+   */
+  private boolean dirOperationsPurgeUploads;
 
   /**
    * Page size for deletions.
@@ -461,7 +462,11 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
    */
   private String scheme = FS_S3A;
 
-  private final static Map<String, Region> BUCKET_REGIONS = new HashMap<>();
+  /**
+   * Flag to indicate that the higher performance copyFromLocalFile implementation
+   * should be used.
+   */
+  private boolean optimizedCopyFromLocal;
 
   /** Add any deprecated keys. */
   @SuppressWarnings("deprecation")
@@ -574,6 +579,9 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       //check but do not store the block size
       longBytesOption(conf, FS_S3A_BLOCK_SIZE, DEFAULT_BLOCKSIZE, 1);
       enableMultiObjectsDelete = conf.getBoolean(ENABLE_MULTI_DELETE, true);
+      // should the delete also purge uploads.
+      dirOperationsPurgeUploads = conf.getBoolean(DIRECTORY_OPERATIONS_PURGE_UPLOADS,
+          DIRECTORY_OPERATIONS_PURGE_UPLOADS_DEFAULT);
 
       this.prefetchEnabled = conf.getBoolean(PREFETCH_ENABLED_KEY, PREFETCH_ENABLED_DEFAULT);
       long prefetchBlockSizeLong =
@@ -660,6 +668,11 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       // verify there's no S3Guard in the store config.
       checkNoS3Guard(this.getUri(), getConf());
 
+      // performance creation flag for code which wants performance
+      // at the risk of overwrites.
+      performanceCreation = conf.getBoolean(FS_S3A_CREATE_PERFORMANCE,
+          FS_S3A_CREATE_PERFORMANCE_DEFAULT);
+      LOG.debug("{} = {}", FS_S3A_CREATE_PERFORMANCE, performanceCreation);
       allowAuthoritativePaths = S3Guard.getAuthoritativePaths(this);
 
       // directory policy, which may look at authoritative paths
@@ -689,6 +702,9 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
               AWS_S3_VECTOR_ACTIVE_RANGE_READS, DEFAULT_AWS_S3_VECTOR_ACTIVE_RANGE_READS, 1);
       vectoredIOContext = populateVectoredIOContext(conf);
       scheme = (this.uri != null && this.uri.getScheme() != null) ? this.uri.getScheme() : FS_S3A;
+      optimizedCopyFromLocal = conf.getBoolean(OPTIMIZED_COPY_FROM_LOCAL,
+          OPTIMIZED_COPY_FROM_LOCAL_DEFAULT);
+      LOG.debug("Using optimized copyFromLocal implementation: {}", optimizedCopyFromLocal);
     } catch (SdkException e) {
       // amazon client exception: stop all services then throw the translation
       cleanupWithLogger(LOG, span);
@@ -870,9 +886,6 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
         STORE_EXISTS_PROBE, bucket, null, () ->
             invoker.retry("doesBucketExist", bucket, true, () -> {
               try {
-                if (BUCKET_REGIONS.containsKey(bucket)) {
-                  return true;
-                }
                 s3Client.headBucket(HeadBucketRequest.builder().bucket(bucket).build());
                 return true;
               } catch (AwsServiceException ex) {
@@ -982,8 +995,6 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
         ? conf.getTrimmed(AWS_REGION)
         : accessPoint.getRegion();
 
-    Region region = getS3Region(configuredRegion);
-
     S3ClientFactory.S3ClientCreationParameters parameters =
         new S3ClientFactory.S3ClientCreationParameters()
         .withCredentialSet(credentials)
@@ -998,7 +1009,7 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
         .withMultipartCopyEnabled(isMultipartCopyEnabled)
         .withMultipartThreshold(multiPartThreshold)
         .withTransferManagerExecutor(unboundedThreadPool)
-        .withRegion(region);
+        .withRegion(configuredRegion);
 
     S3ClientFactory clientFactory = ReflectionUtils.newInstance(s3ClientFactoryClass, conf);
     s3Client = clientFactory.createS3Client(getUri(), parameters);
@@ -1017,75 +1028,6 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
   private void createS3AsyncClient(S3ClientFactory clientFactory,
       S3ClientFactory.S3ClientCreationParameters parameters) throws IOException {
     s3AsyncClient = clientFactory.createS3AsyncClient(getUri(), parameters);
-  }
-
-  /**
-   * Get the bucket region.
-   *
-   * @param region AWS S3 Region set in the config. This property may not be set, in which case
-   *               ask S3 for the region.
-   * @return region of the bucket.
-   */
-  private Region getS3Region(String region) throws IOException {
-
-    if (!StringUtils.isBlank(region)) {
-      return Region.of(region);
-    }
-
-    Region cachedRegion = BUCKET_REGIONS.get(bucket);
-
-    if (cachedRegion != null) {
-      LOG.debug("Got region {} for bucket {} from cache", cachedRegion, bucket);
-      return cachedRegion;
-    }
-
-    Region s3Region = trackDurationAndSpan(STORE_REGION_PROBE, bucket, null,
-        () -> invoker.retry("getS3Region", bucket, true, () -> {
-          try {
-
-            SET_REGION_WARNING.warn(
-                "Getting region for bucket {} from S3, this will slow down FS initialisation. "
-                    + "To avoid this, set the region using property {}", bucket,
-                FS_S3A_BUCKET_PREFIX + bucket + ".endpoint.region");
-
-            // build a s3 client with region eu-west-1 that can be used to get the region of the
-            // bucket. Using eu-west-1, as headBucket() doesn't work with us-east-1. This is because
-            // us-east-1 uses the endpoint s3.amazonaws.com, which resolves bucket.s3.amazonaws.com
-            // to the actual region the bucket is in. As the request is signed with us-east-1 and
-            // not the bucket's region, it fails.
-            S3Client getRegionS3Client =
-                S3Client.builder().region(Region.EU_WEST_1).credentialsProvider(credentials)
-                    .build();
-
-            HeadBucketResponse headBucketResponse =
-                getRegionS3Client.headBucket(HeadBucketRequest.builder().bucket(bucket).build());
-
-            Region bucketRegion = Region.of(
-                headBucketResponse.sdkHttpResponse().headers().get(BUCKET_REGION_HEADER).get(0));
-            BUCKET_REGIONS.put(bucket, bucketRegion);
-
-            return bucketRegion;
-          } catch (S3Exception exception) {
-            if (exception.statusCode() == SC_301_MOVED_PERMANENTLY) {
-              Region bucketRegion = Region.of(
-                  exception.awsErrorDetails().sdkHttpResponse().headers().get(BUCKET_REGION_HEADER)
-                      .get(0));
-              BUCKET_REGIONS.put(bucket, bucketRegion);
-
-              return bucketRegion;
-            }
-
-            if (exception.statusCode() == SC_404_NOT_FOUND) {
-              throw new UnknownStoreException("s3a://" + bucket + "/",
-                  " Bucket does not exist: " + exception,
-                  exception);
-            }
-
-            throw exception;
-          }
-        }));
-
-    return s3Region;
   }
 
   /**
@@ -1313,7 +1255,7 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
         purgeBefore);
     invoker.retry("Purging multipart uploads", bucket, true,
         () -> {
-          MultipartUtils.UploadIterator uploadIterator =
+          RemoteIterator<MultipartUpload> uploadIterator =
               MultipartUtils.listMultipartUploads(createStoreContext(), s3Client, null, maxKeys);
 
           while (uploadIterator.hasNext()) {
@@ -1440,7 +1382,7 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
     public String getBucketLocation(String bucketName) throws IOException {
       final String region = trackDurationAndSpan(
           STORE_EXISTS_PROBE, bucketName, null, () ->
-              once("getBucketLocation()", bucketName, () ->
+              invoker.retry("getBucketLocation()", bucketName, true, () ->
                   // If accessPoint then region is known from Arn
                   accessPoint != null
                       ? accessPoint.getRegion()
@@ -1952,14 +1894,22 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       Progressable progress) throws IOException {
     final Path path = qualify(f);
 
+    // work out the options to pass down
+    CreateFileBuilder.CreateFileOptions options;
+    if (performanceCreation) {
+      options = OPTIONS_CREATE_FILE_PERFORMANCE;
+    }else {
+      options = overwrite
+          ? OPTIONS_CREATE_FILE_OVERWRITE
+          : OPTIONS_CREATE_FILE_NO_OVERWRITE;
+    }
+
     // the span will be picked up inside the output stream
     return trackDurationAndSpan(INVOCATION_CREATE, path, () ->
         innerCreateFile(path,
             progress,
             getActiveAuditSpan(),
-            overwrite
-                ? OPTIONS_CREATE_FILE_OVERWRITE
-                : OPTIONS_CREATE_FILE_NO_OVERWRITE));
+            options));
   }
 
   /**
@@ -1986,14 +1936,19 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       final CreateFileBuilder.CreateFileOptions options) throws IOException {
     auditSpan.activate();
     String key = pathToKey(path);
+    if (key.isEmpty()) {
+      // no matter the creation options, root cannot be written to.
+      throw new PathIOException("/", "Can't create root path");
+    }
     EnumSet<CreateFlag> flags = options.getFlags();
-    boolean overwrite = flags.contains(CreateFlag.OVERWRITE);
-    boolean performance = options.isPerformance();
-    boolean skipProbes = performance || isUnderMagicCommitPath(path);
+
+    boolean skipProbes = options.isPerformance() || isUnderMagicCommitPath(path);
     if (skipProbes) {
       LOG.debug("Skipping existence/overwrite checks");
     } else {
       try {
+        boolean overwrite = flags.contains(CreateFlag.OVERWRITE);
+
         // get the status or throw an FNFE.
         // when overwriting, there is no need to look for any existing file,
         // just a directory (for safety)
@@ -2025,7 +1980,7 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
 
     // put options are derived from the path and the
     // option builder.
-    boolean keep = performance || keepDirectoryMarkers(path);
+    boolean keep = options.isPerformance() || keepDirectoryMarkers(path);
     final PutObjectOptions putOptions =
         new PutObjectOptions(keep, null, options.getHeaders());
 
@@ -2108,11 +2063,14 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       final AuditSpan span = entryPoint(INVOCATION_CREATE_FILE,
           pathToKey(qualified),
           null);
-      return new CreateFileBuilder(this,
+      final CreateFileBuilder builder = new CreateFileBuilder(this,
           qualified,
-          new CreateFileBuilderCallbacksImpl(INVOCATION_CREATE_FILE, span))
-            .create()
-            .overwrite(true);
+          new CreateFileBuilderCallbacksImpl(INVOCATION_CREATE_FILE, span));
+      builder
+          .create()
+          .overwrite(true)
+          .must(FS_S3A_CREATE_PERFORMANCE, performanceCreation);
+      return builder;
     } catch (IOException e) {
       // catch any IOEs raised in span creation and convert to
       // an UncheckedIOException
@@ -2175,7 +2133,8 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
         .create()
         .withFlags(flags)
         .blockSize(blockSize)
-        .bufferSize(bufferSize);
+        .bufferSize(bufferSize)
+        .must(FS_S3A_CREATE_PERFORMANCE, performanceCreation);
     if (progress != null) {
       builder.progress(progress);
     }
@@ -2366,12 +2325,14 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
 
     // Initiate the rename.
     // this will call back into this class via the rename callbacks
+    final StoreContext storeContext = createStoreContext();
     RenameOperation renameOperation = new RenameOperation(
-        createStoreContext(),
+        storeContext,
         src, srcKey, p.getLeft(),
         dst, dstKey, p.getRight(),
-        new OperationCallbacksImpl(),
-        pageSize);
+        new OperationCallbacksImpl(storeContext),
+        pageSize,
+        dirOperationsPurgeUploads);
     return renameOperation.execute();
   }
 
@@ -2392,8 +2353,19 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
     /** Audit Span at time of creation. */
     private final AuditSpan auditSpan;
 
-    private OperationCallbacksImpl() {
-      auditSpan = getActiveAuditSpan();
+    private final StoreContext storeContext;
+
+    private OperationCallbacksImpl(final StoreContext storeContext) {
+      this.storeContext = requireNonNull(storeContext);
+      this.auditSpan = storeContext.getActiveAuditSpan();
+    }
+
+    /**
+     * Get the audit span.
+     * @return the span
+     */
+    private AuditSpan getAuditSpan() {
+      return auditSpan;
     }
 
     @Override
@@ -2493,7 +2465,29 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
               Listing.ACCEPT_ALL_BUT_S3N,
               auditSpan));
     }
-  }
+
+    /**
+     * Abort multipart uploads under a path.
+     * @param prefix prefix for uploads to abort
+     * @return a count of aborts
+     * @throws IOException trouble; FileNotFoundExceptions are swallowed.
+     */
+    @Override
+    @Retries.RetryTranslated
+    public long abortMultipartUploadsUnderPrefix(String prefix)
+        throws IOException {
+      getAuditSpan().activate();
+      // this deactivates the audit span somehow
+      final RemoteIterator<MultipartUpload> uploads =
+          S3AFileSystem.this.listUploadsUnderPrefix(storeContext, prefix);
+      // so reactivate it.
+      getAuditSpan().activate();
+      return foreach(uploads, upload ->
+              invoker.retry("Aborting multipart commit", upload.key(), true, () ->
+                  S3AFileSystem.this.abortMultipartUpload(upload)));
+    }
+
+  }  // end OperationCallbacksImpl
 
   /**
    * Callbacks from {@link Listing}.
@@ -3454,14 +3448,17 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
     // span covers delete, getFileStatus, fake directory operations.
     try (AuditSpan span = createSpan(INVOCATION_DELETE.getSymbol(),
         path.toString(), null)) {
+      // SC will include active span
+      final StoreContext storeContext = createStoreContext();
       boolean outcome = trackDuration(getDurationTrackerFactory(),
           INVOCATION_DELETE.getSymbol(),
           new DeleteOperation(
-              createStoreContext(),
+              storeContext,
               innerGetFileStatus(path, true, StatusProbeEnum.ALL),
               recursive,
-              new OperationCallbacksImpl(),
-              pageSize));
+              new OperationCallbacksImpl(storeContext),
+              pageSize,
+              dirOperationsPurgeUploads));
       if (outcome) {
         try {
           maybeCreateFakeParentDirectory(path);
@@ -4033,9 +4030,9 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
    * the given dst name.
    *
    * This version doesn't need to create a temporary file to calculate the md5.
-   * Sadly this doesn't seem to be used by the shell cp :(
+   * If {@link Constants#OPTIMIZED_COPY_FROM_LOCAL} is set to false,
+   * the superclass implementation is used.
    *
-   * delSrc indicates if the source should be removed
    * @param delSrc whether to delete the src
    * @param overwrite whether to overwrite an existing file
    * @param src path
@@ -4043,35 +4040,59 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
    * @throws IOException IO problem
    * @throws FileAlreadyExistsException the destination file exists and
    * overwrite==false
-   * @throws SdkException failure in the AWS SDK
    */
   @Override
   @AuditEntryPoint
   public void copyFromLocalFile(boolean delSrc, boolean overwrite, Path src,
                                 Path dst) throws IOException {
     checkNotClosed();
-    LOG.debug("Copying local file from {} to {}", src, dst);
-    trackDurationAndSpan(INVOCATION_COPY_FROM_LOCAL_FILE, dst,
-        () -> new CopyFromLocalOperation(
-            createStoreContext(),
-            src,
-            dst,
-            delSrc,
-            overwrite,
-            createCopyFromLocalCallbacks()).execute());
+    LOG.debug("Copying local file from {} to {} (delSrc={} overwrite={}",
+        src, dst, delSrc, overwrite);
+    if (optimizedCopyFromLocal) {
+      trackDurationAndSpan(INVOCATION_COPY_FROM_LOCAL_FILE, dst, () ->
+          new CopyFromLocalOperation(
+              createStoreContext(),
+              src,
+              dst,
+              delSrc,
+              overwrite,
+              createCopyFromLocalCallbacks(getActiveAuditSpan()))
+              .execute());
+    } else {
+      // call the superclass, but still count statistics.
+      // there is no overall span here, as each FS API call will
+      // be in its own span.
+      LOG.debug("Using base copyFromLocalFile implementation");
+      trackDurationAndSpan(INVOCATION_COPY_FROM_LOCAL_FILE, dst, () -> {
+        super.copyFromLocalFile(delSrc, overwrite, src, dst);
+        return null;
+      });
+    }
   }
 
+  /**
+   * Create the CopyFromLocalCallbacks;
+   * protected to assist in mocking.
+   * @param span audit span.
+   * @return the callbacks
+   * @throws IOException failure to get the local fs.
+   */
   protected CopyFromLocalOperation.CopyFromLocalOperationCallbacks
-      createCopyFromLocalCallbacks() throws IOException {
+      createCopyFromLocalCallbacks(final AuditSpanS3A span) throws IOException {
     LocalFileSystem local = getLocal(getConf());
-    return new CopyFromLocalCallbacksImpl(local);
+    return new CopyFromLocalCallbacksImpl(span, local);
   }
 
   protected final class CopyFromLocalCallbacksImpl implements
       CopyFromLocalOperation.CopyFromLocalOperationCallbacks {
+
+    /** Span to use for all operations. */
+    private final AuditSpanS3A span;
     private final LocalFileSystem local;
 
-    private CopyFromLocalCallbacksImpl(LocalFileSystem local) {
+    private CopyFromLocalCallbacksImpl(final AuditSpanS3A span,
+        LocalFileSystem local) {
+      this.span = span;
       this.local = local;
     }
 
@@ -4093,20 +4114,18 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
 
     @Override
     public void copyLocalFileFromTo(File file, Path from, Path to) throws IOException {
-      trackDurationAndSpan(
-          OBJECT_PUT_REQUESTS,
-          to,
-          () -> {
-            final String key = pathToKey(to);
-            Progressable progress = null;
-            PutObjectRequest.Builder putObjectRequestBuilder =
-                newPutObjectRequestBuilder(key, file.length(), false);
-            S3AFileSystem.this.invoker.retry("putObject(" + "" + ")", to.toString(), true,
-                () -> executePut(putObjectRequestBuilder.build(), progress, putOptionsForPath(to),
-                    file));
-
-            return null;
-          });
+      // the duration of the put is measured, but the active span is the
+      // constructor-supplied one -this ensures all audit log events are grouped correctly
+      span.activate();
+      trackDuration(getDurationTrackerFactory(), OBJECT_PUT_REQUESTS.getSymbol(), () -> {
+        final String key = pathToKey(to);
+        PutObjectRequest.Builder putObjectRequestBuilder =
+            newPutObjectRequestBuilder(key, file.length(), false);
+        final String dest = to.toString();
+        S3AFileSystem.this.invoker.retry("putObject(" + dest + ")", dest, true, () ->
+            executePut(putObjectRequestBuilder.build(), null, putOptionsForPath(to), file));
+        return null;
+      });
     }
 
     @Override
@@ -5234,13 +5253,39 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
   @InterfaceAudience.Private
   @Retries.RetryTranslated
   @AuditEntryPoint
-  public MultipartUtils.UploadIterator listUploads(@Nullable String prefix)
+  public RemoteIterator<MultipartUpload> listUploads(@Nullable String prefix)
       throws IOException {
     // span is picked up retained in the listing.
-    return trackDurationAndSpan(MULTIPART_UPLOAD_LIST, prefix, null, () ->
-        MultipartUtils.listMultipartUploads(
-            createStoreContext(), s3Client, prefix, maxKeys
-        ));
+    checkNotClosed();
+    try (AuditSpan span = createSpan(MULTIPART_UPLOAD_LIST.getSymbol(),
+        prefix, null)) {
+      return listUploadsUnderPrefix(createStoreContext(), prefix);
+    }
+  }
+
+  /**
+   * List any pending multipart uploads whose keys begin with prefix, using
+   * an iterator that can handle an unlimited number of entries.
+   * See {@link #listMultipartUploads(String)} for a non-iterator version of
+   * this.
+   * @param storeContext store conext.
+   * @param prefix optional key prefix to search
+   * @return Iterator over multipart uploads.
+   * @throws IOException on failure
+   */
+  @InterfaceAudience.Private
+  @Retries.RetryTranslated
+  public RemoteIterator<MultipartUpload> listUploadsUnderPrefix(
+      final StoreContext storeContext,
+      final @Nullable String prefix)
+      throws IOException {
+    // span is picked up retained in the listing.
+    String p = prefix;
+    if (prefix != null && !prefix.isEmpty() && !prefix.endsWith("/")) {
+      p = prefix + "/";
+    }
+    // duration tracking is done in iterator.
+    return MultipartUtils.listMultipartUploads(storeContext, s3Client, p, maxKeys);
   }
 
   /**
@@ -5262,9 +5307,10 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
     }
     String p = prefix;
     return invoker.retry("listMultipartUploads", p, true, () -> {
-      ListMultipartUploadsRequest.Builder requestBuilder = getRequestFactory()
-          .newListMultipartUploadsRequestBuilder(p);
-      return s3Client.listMultipartUploads(requestBuilder.build()).uploads();
+      final ListMultipartUploadsRequest request = getRequestFactory()
+          .newListMultipartUploadsRequestBuilder(p).build();
+      return trackDuration(getInstrumentation(), MULTIPART_UPLOAD_LIST.getSymbol(), () ->
+          s3Client.listMultipartUploads(request).uploads());
     });
   }
 
@@ -5273,37 +5319,35 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
    * Retry policy: none.
    * @param destKey destination key
    * @param uploadId Upload ID
+   * @throws IOException IO failure, including any uprated SdkException
    */
-  @Retries.OnceRaw
-  void abortMultipartUpload(String destKey, String uploadId) {
-    LOG.info("Aborting multipart upload {} to {}", uploadId, destKey);
-    s3Client.abortMultipartUpload(
-        getRequestFactory().newAbortMultipartUploadRequestBuilder(
-            destKey,
-            uploadId).build());
+  @Retries.OnceTranslated
+  public void abortMultipartUpload(String destKey, String uploadId) throws IOException {
+    LOG.debug("Aborting multipart upload {} to {}", uploadId, destKey);
+    trackDuration(getInstrumentation(), OBJECT_MULTIPART_UPLOAD_ABORTED.getSymbol(), () ->
+        s3Client.abortMultipartUpload(
+            getRequestFactory().newAbortMultipartUploadRequestBuilder(
+                destKey,
+                uploadId).build()));
   }
 
   /**
    * Abort a multipart upload.
    * Retry policy: none.
    * @param upload the listed upload to abort.
+   * @throws IOException IO failure, including any uprated SdkException
    */
-  @Retries.OnceRaw
-  void abortMultipartUpload(MultipartUpload upload) {
-    String destKey;
-    String uploadId;
-    destKey = upload.key();
-    uploadId = upload.uploadId();
-    if (LOG.isInfoEnabled()) {
+  @Retries.OnceTranslated
+  public void abortMultipartUpload(MultipartUpload upload) throws IOException {
+    String destKey = upload.key();
+    String uploadId = upload.uploadId();
+    if (LOG.isDebugEnabled()) {
       DateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
       LOG.debug("Aborting multipart upload {} to {} initiated by {} on {}",
           uploadId, destKey, upload.initiator(),
           df.format(Date.from(upload.initiated())));
     }
-    s3Client.abortMultipartUpload(
-        getRequestFactory().newAbortMultipartUploadRequestBuilder(
-            destKey,
-            uploadId).build());
+    abortMultipartUpload(destKey, uploadId);
   }
 
   /**
@@ -5349,13 +5393,17 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
     case STORE_CAPABILITY_DIRECTORY_MARKER_AWARE:
       return true;
 
+      // Do directory operations purge uploads.
+    case DIRECTORY_OPERATIONS_PURGE_UPLOADS:
+      return dirOperationsPurgeUploads;
+
     // etags are avaialable in listings, but they
     // are not consistent across renames.
     // therefore, only availability is declared
     case CommonPathCapabilities.ETAGS_AVAILABLE:
       return true;
 
-      /*
+       /*
      * Marker policy capabilities are handed off.
      */
     case STORE_CAPABILITY_DIRECTORY_MARKER_POLICY_KEEP:
@@ -5377,6 +5425,14 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
     case FS_S3A_CREATE_PERFORMANCE:
     case FS_S3A_CREATE_HEADER:
       return true;
+
+    // is the FS configured for create file performance
+    case FS_S3A_CREATE_PERFORMANCE_ENABLED:
+      return performanceCreation;
+
+      // is the optimized copy from local enabled.
+    case OPTIMIZED_COPY_FROM_LOCAL:
+      return optimizedCopyFromLocal;
 
     default:
       return super.hasPathCapability(p, cap);
@@ -5628,7 +5684,7 @@ public class S3AFileSystem extends FileSystem implements StreamCapabilities,
       throws IOException {
     createSpan("marker-tool-scan", target,
         null);
-    return new MarkerToolOperationsImpl(new OperationCallbacksImpl());
+    return new MarkerToolOperationsImpl(new OperationCallbacksImpl(createStoreContext()));
   }
 
   /**

@@ -80,7 +80,7 @@ import static org.apache.hadoop.fs.s3a.impl.InstantiationIOException.isAbstract;
 import static org.apache.hadoop.fs.s3a.impl.InstantiationIOException.isNotInstanceOf;
 import static org.apache.hadoop.fs.s3a.impl.InstantiationIOException.unsupportedConstructor;
 import static org.apache.hadoop.fs.s3a.impl.InternalConstants.*;
-import static org.apache.hadoop.fs.s3a.impl.ErrorTranslation.maybeExtractNetworkException;
+import static org.apache.hadoop.fs.s3a.impl.ErrorTranslation.maybeExtractIOException;
 import static org.apache.hadoop.io.IOUtils.cleanupWithLogger;
 import static org.apache.hadoop.util.functional.RemoteIterators.filteringRemoteIterator;
 
@@ -194,7 +194,7 @@ public final class S3AUtils {
         return ioe;
       }
       // network problems covered by an IOE inside the exception chain.
-      ioe = maybeExtractNetworkException(path, exception);
+      ioe = maybeExtractIOException(path, exception);
       if (ioe != null) {
         return ioe;
       }
@@ -1437,6 +1437,11 @@ public final class S3AUtils {
 
     case CSE_KMS:
       LOG.debug("Using CSE-KMS with {}",
+          diagnostics);
+      break;
+
+    case DSSE_KMS:
+      LOG.debug("Using DSSE-KMS with {}",
           diagnostics);
       break;
 
