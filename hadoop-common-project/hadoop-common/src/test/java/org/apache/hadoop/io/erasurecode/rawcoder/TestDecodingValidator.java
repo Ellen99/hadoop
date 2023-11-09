@@ -28,7 +28,6 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
@@ -47,32 +46,23 @@ public class TestDecodingValidator extends TestRawCoderBase {
 
   @Parameterized.Parameters
   public static Collection<Object[]> data() {
-    List<Object[]> result  = cartesianProduct(new Object[][] {
+    return CartesianProductGenerator.generate(new Object[][] {
         {RSRawErasureCoderFactory.class, NativeRSRawErasureCoderFactory.class, XORRawErasureCoderFactory.class, NativeXORRawErasureCoderFactory.class},
         {6,10},
         {3,1},
         {new int[]{1}, new int[]{3}, new int[]{2, 4}, new int[]{0}},
         {new int[]{}, new int[]{0}, new int[]{1}}
        });
-    return result;
+//    return Arrays.asList(new Object[][] {
+//            {RSRawErasureCoderFactory.class, 6, 3, new int[]{1}, new int[]{}},
+//            {RSRawErasureCoderFactory.class, 6, 3, new int[]{3}, new int[]{0}},
+//            {RSRawErasureCoderFactory.class, 6, 3, new int[]{2, 4}, new int[]{1}},
+//            {NativeRSRawErasureCoderFactory.class, 6, 3, new int[]{0}, new int[]{}},
+//            {XORRawErasureCoderFactory.class, 10, 1, new int[]{0}, new int[]{}},
+//            {NativeXORRawErasureCoderFactory.class, 10, 1, new int[]{0},
+//                    new int[]{}}
+//    });
   }
-  private static List<Object[]> cartesianProduct(Object[][] arrays) {
-        List<Object[]> result = new ArrayList<>();
-        cartesianProductRec(arrays, result, 0, new Object[arrays.length]);
-        return result;
-    }
-
-    private static void cartesianProductRec(Object[][] arrays, List<Object[]> result, int index, Object[] current) {
-        if (index == arrays.length) {
-            result.add(current.clone());
-        } else {
-            for (Object item : arrays[index]) {
-                current[index] = item;
-                cartesianProductRec(arrays, result, index + 1, current);
-            }
-        }
-    }
-
   public TestDecodingValidator(
       Class<? extends RawErasureCoderFactory> factoryClass, int numDataUnits,
       int numParityUnits, int[] erasedDataIndexes, int[] erasedParityIndexes) {
