@@ -1724,14 +1724,14 @@
   <name>fs.s3a.encryption.algorithm</name>
   <description>Specify a server-side encryption or client-side
     encryption algorithm for s3a: file system. Unset by default. It supports the
-    following values: 'AES256' (for SSE-S3), 'SSE-KMS', 'SSE-C', and 'CSE-KMS'
+    following values: 'AES256' (for SSE-S3), 'SSE-KMS', 'DSSE-KMS', 'SSE-C', and 'CSE-KMS'
   </description>
 </property>
 
 <property>
   <name>fs.s3a.encryption.key</name>
   <description>Specific encryption key to use if fs.s3a.encryption.algorithm
-    has been set to 'SSE-KMS', 'SSE-C' or 'CSE-KMS'. In the case of SSE-C
+    has been set to 'SSE-KMS', 'DSSE-KMS', 'SSE-C' or 'CSE-KMS'. In the case of SSE-C
     , the value of this property should be the Base64 encoded key. If you are
     using SSE-KMS and leave this property empty, you'll be using your default's
     S3 KMS key, otherwise you should set this property to the specific KMS key
@@ -2527,6 +2527,15 @@ The switch to turn S3A auditing on or off.
 </property>
 
 <property>
+  <name>ipc.server.log.slow.rpc.threshold.ms</name>
+  <value>0</value>
+  <description>The threshold in milliseconds for logging slow rpc when ipc.server.log.slow.rpc is enabled.
+    Besides of being much slower than other RPC requests, an RPC request has to take at least the threshold value
+    defined by this property before it can be considered as slow. By default, this threshold is set to 0 (disabled).
+  </description>
+</property>
+
+<property>
   <name>ipc.server.purge.interval</name>
   <value>15</value>
   <description>Define how often calls are cleaned up in the server.
@@ -2580,10 +2589,20 @@ The switch to turn S3A auditing on or off.
 </property>
 
 <property>
-  <name>callqueue.overflow.trigger.failover</name>
+  <name>ipc.[port_number].callqueue.overflow.trigger.failover</name>
   <value>false</value>
   <description>
     Enable callqueue overflow trigger failover for stateless servers.
+  </description>
+</property>
+
+<property>
+  <name>ipc.callqueue.overflow.trigger.failover</name>
+  <value>false</value>
+  <description>
+    This property is used as fallback property in case
+    "ipc.[port_number].callqueue.overflow.trigger.failover" is not defined.
+    It determines whether or not to enable callqueue overflow trigger failover for stateless servers.
   </description>
 </property>
 
