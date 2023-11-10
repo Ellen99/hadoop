@@ -1946,10 +1946,13 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    *
    * @param datanode on which blocks are located
    * @param size total size of blocks
-   * @param minimumBlockSize
+   * @param minimumBlockSize each block should be of this minimum Block Size
+   * @param timeInterval prefer to get blocks which are belong to
+   *                     the cold files accessed before the time interval
+   * @param storageType the given storage type {@link StorageType}
    */
   public BlocksWithLocations getBlocks(DatanodeID datanode, long size, long
-      minimumBlockSize, long timeInterval) throws IOException {
+      minimumBlockSize, long timeInterval, StorageType storageType) throws IOException {
     OperationCategory checkOp =
         isGetBlocksCheckOperationEnabled ? OperationCategory.READ :
             OperationCategory.UNCHECKED;
@@ -1958,7 +1961,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     try {
       checkOperation(checkOp);
       return getBlockManager().getBlocksWithLocations(datanode, size,
-          minimumBlockSize, timeInterval);
+          minimumBlockSize, timeInterval, storageType);
     } finally {
       readUnlock("getBlocks");
     }
@@ -4534,6 +4537,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
               LOG.warn(lowResourcesMsg + "Already in safe mode.");
             }
             enterSafeMode(true);
+          } else {
+            if (isNoManualAndResourceLowSafeMode()) {
+              LOG.info("Namenode has sufficient available resources, exiting safe mode.");
+              leaveSafeMode(false);
+            }
           }
           try {
             Thread.sleep(resourceRecheckInterval);
@@ -5263,6 +5271,13 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    */
   private synchronized boolean isInManualOrResourceLowSafeMode() {
     return manualSafeMode || resourceLowSafeMode;
+  }
+
+  /**
+   * @return true if it is not in manual safe mode and resource low safe mode.
+   */
+  private synchronized boolean isNoManualAndResourceLowSafeMode() {
+    return !manualSafeMode && resourceLowSafeMode;
   }
 
   private synchronized void setManualAndResourceLowSafeMode(boolean manual,
@@ -9092,6 +9107,21 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           throw new ObserverRetryOnActiveException("Zero blocklocations for " + src);
         }
       }
+    }
+  }
+
+  /**
+   * Get the enclosing root  for the specified path.
+   *
+   * @param srcArg the path of a file or directory to get the EZ for.
+   * @return the enclosing root of the path or null if none.
+   */
+  Path getEnclosingRoot(final String srcArg) throws IOException {
+    EncryptionZone ez = getEZForPath(srcArg);
+    if (ez != null) {
+      return new Path(ez.getPath());
+    } else {
+      return new Path("/");
     }
   }
 }
