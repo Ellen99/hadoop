@@ -52,18 +52,23 @@ public class ITestAzureBlobFileSystemRenameUnicode extends
 
   @Parameterized.Parameters
   public static Iterable<Object[]> params() {
-    return Arrays.asList(
-        new Object[][]{
-            {"/src", "/dest", "filename"},
-            {"/%2c%26", "/abcÖ⇒123", "%2c%27"},
-            {"/ÖáΠ⇒", "/abcÖáΠ⇒123", "中文"},
-            {"/A +B", "/B+ C", "C +D"},
-            {
-                "/A~`!@#$%^&*()-_+={};:'>,<B",
-                "/B~`!@#$%^&*()-_+={};:'>,<C",
-                "C~`!@#$%^&*()-_+={};:'>,<D"
-            }
-        });
+    return CartesianProductGenerator.generate(new Object[][] {
+        {"/src", "/%2c%26", "/ÖáΠ⇒", "/A +B", "/A~`!@#$%^&*()-_+={};:'>,<B"},
+        {"/dest", "/abcÖ⇒123", "/abcÖáΠ⇒123", "/B+ C", "/B~`!@#$%^&*()-_+={};:'>,<C"},
+        {"filename", "%2c%27", "中文", "C +D", "C~`!@#$%^&*()-_+={};:'>,<D"}
+    });
+    // return Arrays.asList(
+    //     new Object[][]{
+    //         {"/src", "/dest", "filename"},
+    //         {"/%2c%26", "/abcÖ⇒123", "%2c%27"},
+    //         {"/ÖáΠ⇒", "/abcÖáΠ⇒123", "中文"},
+    //         {"/A +B", "/B+ C", "C +D"},
+    //         {
+    //             "/A~`!@#$%^&*()-_+={};:'>,<B",
+    //             "/B~`!@#$%^&*()-_+={};:'>,<C",
+    //             "C~`!@#$%^&*()-_+={};:'>,<D"
+    //         }
+    //     });
   }
 
   public ITestAzureBlobFileSystemRenameUnicode() throws Exception {
