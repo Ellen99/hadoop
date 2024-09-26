@@ -46,17 +46,23 @@ public class TestDecodingValidator extends TestRawCoderBase {
 
   @Parameterized.Parameters
   public static Collection<Object[]> data() {
-    return Arrays.asList(new Object[][] {
-        {RSRawErasureCoderFactory.class, 6, 3, new int[]{1}, new int[]{}},
-        {RSRawErasureCoderFactory.class, 6, 3, new int[]{3}, new int[]{0}},
-        {RSRawErasureCoderFactory.class, 6, 3, new int[]{2, 4}, new int[]{1}},
-        {NativeRSRawErasureCoderFactory.class, 6, 3, new int[]{0}, new int[]{}},
-        {XORRawErasureCoderFactory.class, 10, 1, new int[]{0}, new int[]{}},
-        {NativeXORRawErasureCoderFactory.class, 10, 1, new int[]{0},
-            new int[]{}}
-    });
+    return CartesianProductGenerator.generate(new Object[][] {
+        {RSRawErasureCoderFactory.class, NativeRSRawErasureCoderFactory.class, XORRawErasureCoderFactory.class, NativeXORRawErasureCoderFactory.class},
+        {6,10},
+        {3,1},
+        {new int[]{1}, new int[]{3}, new int[]{2, 4}, new int[]{0}},
+        {new int[]{}, new int[]{0}, new int[]{1}}
+       });
+//    return Arrays.asList(new Object[][] {
+//            {RSRawErasureCoderFactory.class, 6, 3, new int[]{1}, new int[]{}},
+//            {RSRawErasureCoderFactory.class, 6, 3, new int[]{3}, new int[]{0}},
+//            {RSRawErasureCoderFactory.class, 6, 3, new int[]{2, 4}, new int[]{1}},
+//            {NativeRSRawErasureCoderFactory.class, 6, 3, new int[]{0}, new int[]{}},
+//            {XORRawErasureCoderFactory.class, 10, 1, new int[]{0}, new int[]{}},
+//            {NativeXORRawErasureCoderFactory.class, 10, 1, new int[]{0},
+//                    new int[]{}}
+//    });
   }
-
   public TestDecodingValidator(
       Class<? extends RawErasureCoderFactory> factoryClass, int numDataUnits,
       int numParityUnits, int[] erasedDataIndexes, int[] erasedParityIndexes) {
