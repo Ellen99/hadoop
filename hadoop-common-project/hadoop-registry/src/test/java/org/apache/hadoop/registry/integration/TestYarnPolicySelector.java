@@ -25,7 +25,12 @@ import org.apache.hadoop.registry.client.types.ServiceRecord;
 import org.apache.hadoop.registry.server.integration.SelectByYarnPersistence;
 import org.apache.hadoop.registry.server.services.RegistryAdminService;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import java.util.Arrays;
+import java.util.Collection;
 
+@RunWith(Parameterized.class)
 public class TestYarnPolicySelector extends RegistryTestHelper {
 
 
@@ -34,32 +39,33 @@ public class TestYarnPolicySelector extends RegistryTestHelper {
       null);
   private RegistryPathStatus status = new RegistryPathStatus("/", 0, 0, 1);
 
+  private final boolean outcome;
+  private final String id;
+  private final String policy;
+
+  public TestYarnPolicySelector(boolean outcome, String id, String policy){
+    this.outcome = outcome;
+    this.id = id;
+    this.policy = policy;
+  }
   public void assertSelected(boolean outcome,
       RegistryAdminService.NodeSelector selector) {
     boolean select = selector.shouldSelect("/", status, record);
     assertEquals(selector.toString(), outcome, select);
   }
 
-  @Test
-  public void testByContainer() throws Throwable {
-    assertSelected(false,
-        new SelectByYarnPersistence("1",
-            PersistencePolicies.CONTAINER));
+  @Parameterized.Parameters
+  public static Collection<Object[]> data() {
+    return Arrays.asList(new Object[][]{
+            {false, "1", PersistencePolicies.CONTAINER},
+            {true, "1", PersistencePolicies.APPLICATION},
+            {false, "2", PersistencePolicies.APPLICATION}
+    });
   }
 
   @Test
-  public void testByApp() throws Throwable {
-    assertSelected(true,
-        new SelectByYarnPersistence("1",
-            PersistencePolicies.APPLICATION));
+  public void testByAll() throws Throwable {
+    assertSelected(outcome,
+            new SelectByYarnPersistence(id,policy));
   }
-
-
-  @Test
-  public void testByAppName() throws Throwable {
-    assertSelected(false,
-        new SelectByYarnPersistence("2",
-            PersistencePolicies.APPLICATION));
-  }
-
 }
